@@ -1,0 +1,583 @@
+Установка Apache
+# dnf install httpd
+
+Подготовка директорий
+# mkdir -p /web/fsdn.corp/public/{htdocs,cgi-bin}
+# mkdir /web/fsdn.corp/auth
+# mkdir -p /web-logs
+# chown -R apache:apache /web
+# chown root:root /web-logs
+# semanage fcontext -a -t httpd_sys_content_t '/web(/.*)?'
+# semanage fcontext -a -t httpd_log_t '/web-logs(/.*)?'
+# restorecon -Rv /web
+# restorecon -Rv /web-logs
+
+Установка php
+# dnf module enable php:7.3
+# dnf install php php-opcache php-gd php-curl php-mysqlnd
+
+Установка mysql
+# dnf module enable mysql:8.0
+# dnf install mysql mysql-server
+
+Запуск демонов:
+# systemctl start mysqld.service
+# systemctl enable mysqld.service
+# systemctl start php-fpm.service
+# systemctl enable php-fpm.service
+# systemctl start httpd
+# systemctl enable httpd
+
+Файловая аутентификация (если надо)
+# htpasswd -c /web/fsdn.corp/auth/.user-auth denys
+# htpasswd /web/fsdn.corp/auth/.user-auth kara
+# cat /web/fsdn.corp/auth/.user-auth
+denys:$apr1$GcA2hBTz$Svpwq3xCngiwBAAWEwZLR0
+kara:$apr1$UAFlTgSE$9CAqcYpPTwcYyKfyyCwLT1
+
+Аутентификация с помощью MYSQL (если надо)
+# mysql_secure_installation
+# httpd -M | grep authn_dbd
+authn_dbd_module (shared)
+# dnf install perl-DBD-MySQL
+# dnf install apr-util-mysql
+# mysqladmin -u root -p
+# <mysql> CREATE DATABASE apacheauth;
+# <mysql> SHOW DATABASES;
+# <mysql> CREATE USER 'apache'@'localhost' IDENTIFIED BY 'Yakagam@220987';
+# <mysql> SELECT user, host FROM mysql.user;
+# <mysql> GRANT SELECT, INSERT, UPDATE, DELETE ON apacheauth.* TO 'apache'@'localhost';
+# <mysql> FLUSH PRIVILEGES;
+# <mysql> USE apacheauth;
+# <mysql> CREATE TABLE mysql_auth (username VARCHAR(255) NOT NULL PRIMARY KEY, passwd VARCHAR(255), active VARCHAR(255));
+# <mysql> QUIT
+# htpasswd -ns denys
+New password:
+Re-type new password:
+denys:{SHA}RQCtKoNiY3Xoju07tvTQQOQSaRU=
+# mysqladmin -u root -p
+# <mysql> INSERT INTO `mysql_auth` (`username`, `passwd`, `active`) VALUES('denys', '{SHA}RQCtKoNiY3Xoju07tvTQQOQSaRU=', 'yes');
+# <mysql> SELECT * from mysql_auth;
++----------+-----------------------------------+--------+
+| username | passwd                            | active |
++----------+-----------------------------------+--------+
+| denys    | {SHA}RQCtKoNiY3Xoju07tvTQQOQSaRU= | yes    |
++----------+-----------------------------------+--------+
+
+**************************
+--------------------------
+**************************
+**************************
+Виртуальный хост.
+**************************
+**************************
+--------------------------
+**************************
+
+Создание конфигурационного файла.
+# nano /etc/httpd/conf.d/fsdn.corp
+<VirtualHost *:80>
+  ServerName fsdn.corp
+  ServerAlias www.fsdn.corp
+  ServerAdmin superadm@fsdn.corp
+
+  DocumentRoot "/web/fsdn.corp/public/htdocs"
+  ScriptAlias /cgi-bin/ "/web/fsdn.corp/public/cgi-bin/"
+
+  ErrorLog /web-logs/fsdn-error.log
+  LogLevel warn
+  CustomLog /web-logs/fsdn-access.log "%v %h %l %u %t \"%r\" %>s %b \"%{Referer}i\" \"%{User-agent}i\""
+
+  DirectoryIndex index.php index.html
+
+  <Ifmodule mod_http2.c>
+      Protocols h2c http/1.1
+  </IfModule>
+
+  <Directory /web/fsdn.corp/public/cgi-bin/>
+    Options ExecCGI
+    AddHandler cgi-script .cgi .pl
+  </Directory>
+
+  <Directory /web/fsdn.corp/public/htdocs>
+    AllowOverride none
+    Options FollowSymLinks
+    Require all granted
+  </Directory>
+  
+  # File authentication
+  <Directory /web/fsdn.corp/public/htdocs/private>
+    Options Indexes
+    AuthName "Access only for FulldomeStudio DN employers"
+    AuthType Basic
+    AuthUserFile /web/fsdn.corp/auth/.user-auth
+    Require valid-user
+  </Directory>
+  
+  # Authentication Basic + PAM
+  # Нужно установить yum --enablerepo=epel -y install mod_authnz_external pwauth 
+  <Directory /web/fsdn.corp/public/htdocs/private_pam>
+    AuthType Basic
+    AuthName "PAM Authentication"
+    AuthBasicProvider external
+    AuthExternal pwauth
+    require valid-user
+  </Directory>
+  
+  # MYSQL authentication
+  DBDriver mysql
+  DBDParams "dbname=apacheauth user=apache password=Yakagam@220987"
+
+  DBDMin  4
+  DBDKeep 8
+  DBDMax  20
+  DBDExptime 300
+  <Directory /web/fsdn.corp/public/htdocs/secret>
+    Options Indexes
+    AuthName "Access only for FulldomeStudio DN employers located in MYSQL"
+    AuthType Basic
+    AuthBasicProvider socache dbd
+    AuthnCacheProvideFor dbd
+    AuthnCacheContext my-server
+    Require valid-user
+    AuthDBDUserPWQuery "SELECT passwd FROM mysql_auth WHERE username = %s and active = 'yes'"
+  </Directory>
+
+  <Location /server-info>
+    SetHandler server-info
+  </Location>
+  <Location /server-status>
+    SetHandler server-status
+  </Location>
+  <Location /server-*>
+    Order allow,deny
+    allow from 192.168.0.100
+    AuthName "Access only for FulldomeStudio DN employers located in MYSQL"
+    AuthType Basic
+    AuthBasicProvider socache dbd
+    AuthnCacheProvideFor dbd
+    AuthnCacheContext my-server
+    Require valid-user
+    AuthDBDUserPWQuery "SELECT passwd FROM mysql_auth WHERE username = %s and active = 'yes'"
+  </Location>
+</VirtualHost>
+
+**************************
+--------------------------
+**************************
+**************************
+Rewrithe ruls
+**************************
+**************************
+--------------------------
+**************************
+Пример конфига перенаправления
+
+<VirtualHost *:80>
+  ServerName fsdn.corp
+  ServerAlias www.fsdn.corp
+  ServerAdmin superadm@fsdn.corp
+
+  DocumentRoot "/web/www.fsdn.corp/public/htdocs"
+  ScriptAlias /cgi-bin/ "/web/www.fsdn.corp/public/cgi-bin/"
+
+  ErrorLog /web/www.fsdn.corp/logs/error.log
+  LogLevel warn rewrite:trace8
+
+  CustomLog /web/www.fsdn.corp/logs/access.log "%v %h %l %u %t \"%r\" %>s %b \"%{Referer}i\" \"%{User-agent}i\""
+
+  DirectoryIndex index.php index.html
+
+  <Ifmodule mod_http2.c>
+      Protocols h2c http/1.1
+  </IfModule>
+  
+  # Пример перенаправления (для всего виртуального хоста). НАДО НЕЗАБЫТЬ ВКЛЮЧИТЬ RewriteEngine On
+  <IfModule rewrite_module>
+    RewriteEngine Off
+    RewriteRule "^/index\.html$"  "/new_index.html" [PT]               # перенаправление на другой html
+#    RewriteRule "^/mr/(.+)" "http://planetarium.corp/mr/$1" [R,L]     # Любые запросы начиная с /mr перенаправляются на другой хост
+#    RewriteRule "^/(.*)" "http://planetarium.corp/$1" [R,L]           # Любые запросы начиная с корня отправляются на другой хост
+#    RewriteRule "^/.*" "http://planetarium.dn.ua"                     
+#    RewriteRule "^/mr/(.*)" "/mr2/$1" [R=301,L]                       # Любые запросы начиная с папки /mr перенаправляются в папку /mr2 
+  </IfModule>
+  
+  # Пример перенаправления (для директории). НАДО НЕЗАБЫТЬ ВКЛЮЧИТЬ RewriteEngine On
+  <Directory /web/www.fsdn.corp/public/htdocs>
+    AllowOverride none
+    Options FollowSymLinks
+    Require all granted
+    <IfModule rewrite_module>
+      RewriteEngine Off
+      RewriteRule "^index\.html$" "/new_index.html" [PT]
+    </IfModule>
+  </Directory>
+
+</VirtualHost>
+
+**************************
+--------------------------
+**************************
+**************************
+HTTPS и перенаправление
+**************************
+**************************
+--------------------------
+**************************
+Заметка.
+Создание запросов на сертификат, создание самоподписаного сертификата
+отлично рассмотрено в момем документе ../OpenSSL/Путь получения сертификата.pdf
+
+<VirtualHost *:443>
+  ServerName observatory.corp
+  ServerAlias www.observatory.corp
+  ServerAdmin superadm@observatory.corp
+
+  DocumentRoot "/web/observatory.corp/public/htdocs"
+  ScriptAlias /cgi-bin/ "/web/observatory.corp/public/cgi-bin/"
+
+  ErrorLog /web-logs/observatory-error.log
+  LogLevel warn
+  CustomLog /web-logs/observatory-access.log "%v %h %l %u %t \"%r\" %>s %b \"%{Referer}i\" \"%{User-agent}i\""
+
+  DirectoryIndex index.html index.php
+
+  <IfModule mod_ssl.c>
+    SSLEngine on
+    SSLCertificateFile "/etc/httpd/tls/observatory-prime256v1-crt.pem"
+    SSLCertificateKeyFile "/etc/httpd/tls/observatory-prime256v1-key.pem"
+    SSLCipherSuite HIGH:!aNULL:!eNULL:!EXP:!MD5
+    SSLProtocol all -SSLv3 -TLSv1 -TLSv1.1 -TLSv1.2
+
+    Header always set Strict-Transport-Security "max-age=2592000"
+
+    <Ifmodule mod_http2.c>
+      Protocols h2 http/1.1
+    </IfModule>
+  </IfModule>
+
+  <Directory /web/www.observatory.corp/public/htdocs>
+    AllowOverride none
+    Options FollowSymLinks
+    Require all granted
+  </Directory>
+
+</VirtualHost>
+
+
+<VirtualHost *:80>
+  ServerName observatory.corp
+  ServerAlias www.observatory.corp
+
+  ErrorLog /web/www.observatory.corp/logs/error.log
+  LogLevel warn rewrite:trace3
+  CustomLog /web/www.observatory.corp/logs/access.log "%v %h %l %u %t \"%r\" %>s %b \"%{Referer}i\" \"%{User-agent}i\""
+
+  <IfModule rewrite_module>
+    # перенаправление всего хоста с 80 на 443 порт
+	RewriteEngine On
+    RewriteCond "%{HTTPS}" !="on"
+    RewriteRule "^/(.*)$" https://%{HTTP_HOST}/$1 [R=301,L]
+    
+	# Перенаправление отдельной папки с 80 на 443 порт. НАДО НЕЗАБЫТЬ ВКЛЮЧИТЬ RewriteEngine On
+#    RewriteEngine Off
+#    RewriteCond "%{HTTPS}" !="on"
+#    RewriteRule "^/envs/(.*)$" https://%{HTTP_HOST}/envs/$1 [R,L]
+     
+	# Перенаправление определенных расширений с 80 на 443 порт. НАДО НЕЗАБЫТЬ ВКЛЮЧИТЬ RewriteEngine On
+#    RewriteEngine On
+#    RewriteCond "%{HTTPS}" !="on"
+#    RewriteCond "%{REQUEST_URI}" "(.+\.txt|.+\.tx)"
+#    RewriteRule "^.+$" https://%{HTTP_HOST}%{REQUEST_URI}
+  </IfModule>
+
+  DocumentRoot "/web/www.observatory.corp/public/htdocs"
+  ScriptAlias /cgi-bin/ "/web/www.observatory.corp/public/cgi-bin/"
+
+  <Directory /web/www.observatory.corp/public/htdocs>
+    AllowOverride none
+    Options FollowSymLinks
+    Require all granted
+  </Directory>
+
+  <Ifmodule mod_http2.c>
+    Protocols h2 h2c http/1.1
+  </IfModule>
+
+</VirtualHost>
+
+**************************
+--------------------------
+**************************
+**************************
+Forward proxy Server. Т.е. доступ в интернет для офисных рабочих (если не охота ставить Squid)
+**************************
+**************************
+--------------------------
+**************************
+
+Listen 8080
+<VirtualHost *:8080>
+  ServerName fproxy.corp
+  ServerAdmin superadm@fsdn.corp
+
+  ProxyRequests On
+  ProxyBlock facebook.com
+  ProxyVia On
+  <Proxy *>
+    Order Allow,Deny
+    Allow from 192.168.0.0/24
+  </Proxy>
+
+  CacheEnable disk /
+  CacheRoot /web/fproxy/cache
+  CacheMinFileSize 64
+  CacheMaxFileSize 20480000
+  CacheMinExpire 600
+  CacheDefaultExpire 3600
+  CacheMaxExpire 36000
+
+  DocumentRoot /web/fproxy.corp/public/htdocs
+  <Directory /web/fproxy.corp/public/htdocs>
+    AuthName "Access only for fproxy admins"
+    AuthType Basic
+    AuthBasicProvider socache dbd
+    AuthnCacheProvideFor dbd
+    AuthnCacheContext my-server
+    Require valid-user
+    AuthDBDUserPWQuery "SELECT password FROM authn WHERE user = %s and active = 'yes'"
+
+    Order allow,deny
+    Allow from 192.168.0.0/24
+  </Directory>
+
+  ErrorLog /web/fproxy.corp/logs/error.log
+  LogLevel warn
+  CustomLog /web/fproxy.corp/logs/access.log "%v %h %l %u %t \"%r\" %>s %b \"%{Referer}i\" \"%{User-agent}i\""
+
+</VirtualHost>
+
+
+**************************
+--------------------------
+**************************
+**************************
+Revers proxy Server. Т.е. доступ клиентов из интернет на другие web сервера.
+**************************
+**************************
+--------------------------
+**************************
+
+#
+#               PLANETARIUM.CORP
+#
+<VirtualHost *:80>
+  ServerName planetarium.corp
+  ServerAdmin superadm@planetarium.corp
+
+  RewriteEngine On
+  RewriteCond %{HTTPS} !="on"
+  RewriteRule "^/(.*)" https://%{SERVER_NAME}/$1 [R=301,L]
+
+  ErrorLog /web/rproxy.corp/logs/error.log
+  LogLevel warn
+  CustomLog /web/rproxy.corp/logs/access.log "%v %h %l %u %t \"%r\" %>s %b \"%{Referer}i\" \"%{User-agent}i\""
+
+</VirtualHost>
+
+<VirtualHost *:443>
+  ServerName planetarium.corp
+  ServerAdmin superadm@planetarium.corp
+
+  Protocols h2 h2c http/1.1
+
+  ProxyRequests Off
+  ProxyPreserveHost On
+  ProxyAddHeaders On
+  ProxyPass "/" http://192.168.0.235:80/
+  ProxyPassReverse "/" http://192.168.0.235:80/
+  ProxyVia On
+
+  RequestHeader set X-Forwarded-Proto "https"
+  RequestHeader set X-Forwarded-Port "443"
+
+  SSLEngine On
+  SSLCertificateFile "/etc/httpd/tls/planetarium-prime256v1-crt.pem"
+  SSLCertificateKeyFile "/etc/httpd/tls/planetarium-prime256v1-key.pem"
+  SSLProtocol TLSv1.3
+  SSLCipherSuite HIGH:!aNULL:!eNULL:!MD5
+
+  <Proxy *>
+    Order allow,deny
+    Allow from all
+  </Proxy>
+
+  CacheEnable disk /
+  CacheRoot /web/rproxy/cache
+  CacheMinFileSize 64
+  CacheMaxFileSize 20480000
+  CacheMinExpire 600
+  CacheDefaultExpire 3600
+  CacheMaxExpire 36000
+
+  ErrorLog /web/rproxy.corp/logs/error.log
+  LogLevel warn
+  CustomLog /web/rproxy.corp/logs/access.log "%v %h %l %u %t \"%r\" %>s %b \"%{Referer}i\" \"%{User-agent}i\""
+
+</VirtualHost>
+
+#
+#       FSDN.CORP
+#
+
+<VirtualHost *:80>
+  ServerName fsdn.corp
+  ServerAdmin superadm@fsdn.corp
+
+  ProxyRequests Off
+  ProxyPreserveHost On
+  ProxyAddHeaders On
+
+  ProxyPass "/page3" http://192.168.0.234:80/page3
+  ProxyPassReverse "/page3" http://192.168.0.234:80/page3
+
+  ProxyPass "/page4" http://192.168.0.234:80/
+  ProxyPassReverse "/page4" http://192.168.0.234:80/
+  RewriteEngine On
+  RewriteCond %{REQUEST_URI} !\..+$
+  RewriteRule "^/(.+[^/])$" "http://fsdn.corp/$1/"
+
+  ProxyPass "/" http://192.168.0.235:80/
+  ProxyPassReverse "/" http://192.168.0.235:80/
+
+  <Proxy *>
+    Order allow,deny
+    Allow from all
+  </Proxy>
+
+  CacheEnable disk /
+  CacheRoot /web/rproxy/cache
+  CacheMinFileSize 64
+  CacheMaxFileSize 20480000
+  CacheMinExpire 600
+  CacheDefaultExpire 3600
+  CacheMaxExpire 36000
+
+  ErrorLog /web/rproxy.corp/logs/error.log
+  LogLevel warn rewrite:trace3
+  CustomLog /web/rproxy.corp/logs/access.log "%v %h %l %u %t \"%r\" %>s %b \"%{Referer}i\" \"%{User-agent}i\""
+
+</VirtualHost>
+
+**************************
+--------------------------
+**************************
+**************************
+Балансировщик нагрузки
+**************************
+**************************
+--------------------------
+**************************
+#
+#               FSDN.CORP
+#
+
+<VirtualHost *:80>
+  ServerName fsdn.corp
+  ServerAdmin superadm@fsdn.corp
+
+  ProxyRequests Off
+  ProxyPreserveHost On
+  ProxyAddHeaders On
+
+  ProxyPass /balancer-manager !
+  ProxyPass "/" balancer://fsdn-cluster/
+
+  <Proxy balancer://fsdn-cluster>
+    BalancerMember http://192.168.0.235:80
+    BalancerMember http://192.168.0.234:80
+    ProxySet lbmethod=byrequests
+    Require all granted
+  </Proxy>
+
+  <Location /balancer-manager>
+    SetHandler balancer-manager
+    Require ip 192.168.0.100
+  </Location>
+
+  CacheEnable disk /
+  CacheRoot /web/lb.corp/cache
+  CacheMinFileSize 64
+  CacheMaxFileSize 20480000
+  CacheMinExpire 600
+  CacheDefaultExpire 3600
+  CacheMaxExpire 36000
+
+  ErrorLog /web/lb.corp/logs/error.log
+  LogLevel warn
+  CustomLog /web/lb.corp/logs/access.log "%v %h %l %u %t \"%r\" %>s %b \"%{Referer}i\" \"%{User-agent}i\""
+
+</VirtualHost>
+
+#
+#               PLANETARIUM.CORP
+#
+
+<VirtualHost *:80>
+  ServerName planetarium.corp
+  ServerAdmin superadm@planetarium.corp
+
+  RewriteEngine On
+  RewriteCond %{HTTPS} !="on"
+  RewriteRule "^/(.*)" https://%{SERVER_NAME}/$1 [R=301,L]
+
+  ErrorLog /web/lb.corp/logs/error.log
+  LogLevel warn
+  CustomLog /web/lb.corp/logs/access.log "%v %h %l %u %t \"%r\" %>s %b \"%{Referer}i\" \"%{User-agent}i\""
+
+</VirtualHost>
+
+<VirtualHost *:443>
+  ServerName planetarium.corp
+  ServerAdmin superadm@planetarium.corp
+
+  Protocols h2 h2c http/1.1
+
+  ProxyRequests Off
+  ProxyPreserveHost On
+  ProxyAddHeaders On
+  ProxyPass "/" balancer://planetarium-cluster/
+  ProxyVia On
+
+  RequestHeader set X-Forwarded-Proto "https"
+  RequestHeader set X-Forwarded-Port "443"
+
+  SSLEngine On
+  SSLCertificateFile "/etc/httpd/tls/planetarium-prime256v1-crt.pem"
+  SSLCertificateKeyFile "/etc/httpd/tls/planetarium-prime256v1-key.pem"
+  SSLProtocol TLSv1.3
+  SSLCipherSuite HIGH:!aNULL:!eNULL:!MD5
+
+  <Proxy balancer://planetarium-cluster>
+    BalancerMember http://192.168.0.235:80
+    BalancerMember http://192.168.0.234:80
+    ProxySet lbmethod=byrequests
+    Require all granted
+  </Proxy>
+
+  CacheEnable disk /
+  CacheRoot /web/rproxy/cache
+  CacheMinFileSize 64
+  CacheMaxFileSize 20480000
+  CacheMinExpire 600
+  CacheDefaultExpire 3600
+  CacheMaxExpire 36000
+
+  ErrorLog /web/lb.corp/logs/error.log
+  LogLevel warn
+  CustomLog /web/lb.corp/logs/access.log "%v %h %l %u %t \"%r\" %>s %b \"%{Referer}i\" \"%{User-agent}i\""
+
+</VirtualHost>
+
+
+

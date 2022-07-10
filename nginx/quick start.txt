@@ -1,0 +1,383 @@
+Установка Nginx
+# dnf module enable nginx:1.16
+# dnf install nginx
+
+Подготовка директорий
+# mkdir -p /web/fsdn.corp/public/{htdocs,cgi-bin}
+# mkdir /web/fsdn.corp/auth
+# mkdir -p /web-logs
+# chown -R apache:apache /web
+# chown root:root /web-logs
+# semanage fcontext -a -t httpd_sys_content_t '/web(/.*)?'
+# semanage fcontext -a -t httpd_log_t '/web-logs(/.*)?'
+# restorecon -Rv /web
+# restorecon -Rv /web-logs
+
+Установка и настройка php
+# dnf module enable php:7.3
+# dnf install php php-mysqlnd php-fpm php-opcache php-gd php-xml php-mbstring
+# nano /etc/php-fpm.d/www.conf
+делаем так:
+user = nginx
+group = nginx
+
+Установка mysql
+# dnf module enable mysql:8.0
+# dnf install mysql mysql-server
+
+Запуск демонов:
+# systemctl start mysqld.service
+# systemctl enable mysqld.service
+# systemctl start php-fpm.service
+# systemctl enable php-fpm.service
+# systemctl start nginx
+# systemctl enable nginx
+
+Файловая аутентификация (если надо)
+# htpasswd -c /web/fsdn.corp/auth/.htpasswd denys
+# htpasswd /web/fsdn.corp/auth/.htpasswd kara
+# cat /web/fsdn.corp/auth/.user-auth
+denys:$apr1$GcA2hBTz$Svpwq3xCngiwBAAWEwZLR0
+kara:$apr1$UAFlTgSE$9CAqcYpPTwcYyKfyyCwLT1
+
+-------------------------------------
+*************************************
+Виртуальный хосты
+*************************************
+-------------------------------------
+
+Конфигурационный файл имеет вид:
+
+limit_conn_zone $binary_remote_addr zone=conn-perip-fsdn:10m;
+limit_req_zone $binary_remote_addr zone=req-perip-fsdn:10m rate=10r/s;
+limit_req_zone $binary_remote_addr zone=req-perip-fsdn-phpmyadm:10m rate=100r/s;
+
+log_format fsdn-log-format '$server_name <- $remote_addr - $remote_user [$time_local] "$request" '
+                           '$status $body_bytes_sent "$http_referer" '
+                           '"$http_user_agent" "$http_x_forwarded_for"';
+
+server {
+  listen 80;
+  server_name fsdn.corp www.fsdn.corp;
+  root /web/fsdn.corp/public/htdocs;
+
+  access_log /web/fsdn.corp/logs/access.log fsdn-log-format;
+  error_log /web/fsdn.corp/logs/error.log warn;
+
+  error_page 404 /404.html;
+  error_page 500 502 503 504 /50x.html;
+
+  server_tokens off;
+  charset utf-8;
+
+  limit_conn conn-perip-fsdn 50;
+  limit_conn_log_level error;
+  limit_conn_status 503;
+  limit_req zone=req-perip-fsdn burst=5 nodelay;
+  limit_req_log_level error;
+  limit_req_status 503;
+
+
+
+  location / {
+    index index.php index.html;
+  }
+
+  location /pmadm {
+    limit_req zone=req-perip-fsdn-phpmyadm burst=5 nodelay;
+    limit_req_log_level error;
+    limit_req_status 503;
+  }
+
+  location /secret {
+    autoindex on;
+
+    auth_basic "Only for IT employers";
+    auth_basic_user_file /web/fsdn.corp/auth/.htpasswd;
+    allow 192.168.0.100;
+    deny all;
+    satisfy all;
+  }
+
+  location ~ ^.*/downloads.* {
+    autoindex on;
+    autoindex_exact_size off;
+
+    limit_conn conn-perip-fsdn 1;
+    limit_rate_after 1m;
+    limit_rate 128k;
+
+    error_page 503 /50x-downloads.html;
+  }
+
+  location ~ ^.*videos.* {
+    autoindex on;
+    autoindex_exact_size off;
+
+    mp4;
+    mp4_buffer_size 5M;
+    mp4_max_buffer_size 20M;
+
+    limit_conn conn-perip-fsdn 1;
+    limit_rate_after 1m;
+    limit_rate 128k;
+  }
+
+  location ~ /\..* {
+    deny all;
+  }
+
+  include /etc/nginx/default.d/*.conf;
+}
+
+-------------------------------------
+*************************************
+HTTPS и redirect
+*************************************
+-------------------------------------
+
+server {
+  listen 80;
+  server_name planetarium.corp www.planetarium.corp;
+
+  access_log /web/planetarium.corp/logs/access.log main;
+  error_log /web/planetarium.corp/logs/error.log notice;
+
+  error_page 404 /404.html;
+  error_page 500 502 503 504 /50x.html;
+
+  server_tokens off;
+
+  rewrite_log on;
+#  return 301 "https://$host$request_uri";
+#  if ($request_uri ~ "^/audio(.*)$") {
+#    return 302 "https://$host/page1$1";
+#  }
+#  if ($request_uri ~ "^/video(.*)$") {
+#    return 302 "https://$host/page2$1";
+#  }
+#   if ($https != "on") {
+#    return 301 "https://$host$request_uri";
+#  }
+  # Если заходят с Edge браузера на любой локейшин начинающийся с /audio, то редиректим на https на локейшин начинающийся с /page3 
+  if ($http_user_agent ~ "^.*Edge.*$") {
+    rewrite "^/audio(.*)$" "https://$host/page3$1" redirect;
+  }
+  rewrite "^/audio(.*)$" "https://$host/page1$1" redirect;
+  rewrite "^/video(.*)$" "https://$host/page2$1" redirect;
+  rewrite "^(.*)$" "https://$host$1" permanent;
+
+  location "/favicon.ico" {
+    log_not_found off;
+  }
+}
+
+server {
+  listen 443 ssl http2;
+  server_name planetarium.corp www.planetarium.corp;
+  root /web/planetarium.corp/public/htdocs;
+
+  ssl_certificate "/etc/nginx/auth/planetarium-prime256v1-crt.pem";
+  ssl_certificate_key "/etc/nginx/auth/planetarium-prime256v1-key.pem";
+  ssl_protocols TLSv1.3;
+  ssl_ciphers HIGH:!aNULL:!MD5;
+
+  ssl_session_cache shared:TLS:10m;
+  ssl_session_timeout 10m;
+
+  add_header Strict-Transport-Security max-age=604800;
+
+  access_log /web/planetarium.corp/logs/access.log main;
+  error_log /web/planetarium.corp/logs/error.log warn;
+
+  error_page 404 /404.html;
+  error_page 500 502 503 504 /50x.html;
+
+  server_tokens off;
+
+  location "/" {
+    disable_symlinks on;
+    index index.php index.html;
+    autoindex off;
+  }
+
+  location "/favicon.ico" {
+    log_not_found off;
+  }
+
+  location ~ "^/page[1-3]/?$" {
+    autoindex on;
+  }
+
+  location ~ "/\..*" {
+    deny all;
+  }
+
+  include /etc/nginx/default.d/*.conf;
+}
+
+-------------------------------------
+*************************************
+Прокси сервер
+*************************************
+-------------------------------------
+
+log_format proxy 'to $server_name from $remote_addr - $remote_user at [$time_local] '
+                 '"$request" $status $body_bytes_sent '
+                 '"$http_referer" "$http_user_agent"';
+
+large_client_header_buffers 4 16k;
+
+server {
+  listen 80;
+  server_name fsdn.corp;
+  access_log /web/proxy/logs/access.log proxy;
+  error_log /web/proxy/logs/error.log warn;
+  server_tokens off;
+
+  proxy_http_version 1.1;
+  proxy_set_header Host $host;
+  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+  proxy_set_header X-Real-IP $remote_addr;
+  proxy_set_header X-Forwarded-Proto $scheme;
+
+  location "/" {
+    proxy_pass http://192.168.0.235;
+  }
+
+  location "/page3/" {
+    proxy_pass http://192.168.0.234;
+  }
+
+  location "/videos/" {
+    proxy_pass http://192.168.0.234/page4/;
+  }
+
+  location "/version2/" {
+    proxy_pass http://192.168.0.234/;
+  }
+}
+
+server {
+  listen 80;
+  server_name planetarium.corp;
+  access_log /web/proxy/logs/access.log proxy;
+  error_log /web/proxy/logs/error.log warn;
+
+  return 301 https://$server_name$request_uri;
+
+  server_tokens off;
+
+}
+
+
+server {
+  listen 443 ssl http2;
+  server_name planetarium.corp;
+  access_log /web/proxy/logs/access.log proxy;
+  error_log /web/proxy/logs/error.log warn;
+
+  server_tokens off;
+
+  ssl_certificate "/etc/nginx/auth/planetarium-prime256v1-crt.pem";
+  ssl_certificate_key "/etc/nginx/auth/planetarium-prime256v1-key.pem";
+  ssl_protocols TLSv1.3;
+  ssl_ciphers HIGH:!aNULL:!MD5;
+
+  ssl_session_cache shared:TLS:10m;
+  ssl_session_timeout 10m;
+
+  add_header Strict-Transport-Security max-age=604800;
+
+  proxy_http_version 1.1;
+  proxy_set_header Host $host;
+  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+  proxy_set_header X-Real-IP $remote_addr;
+  proxy_set_header X-Forwarded-Proto $scheme;
+
+  location "/" {
+    proxy_pass http://192.168.0.235;
+  }
+}
+
+-------------------------------------
+*************************************
+Балансировщик нагрузки
+*************************************
+-------------------------------------
+
+log_format proxy 'to $server_name from $remote_addr - $remote_user at [$time_local] '
+                 '"$request" $status $body_bytes_sent '
+                 '"$http_referer" "$http_user_agent"';
+
+large_client_header_buffers 4 16k;
+
+upstream fsdn-stream {
+  server 192.168.0.235 weight=1 max_conns=0 max_fails=1 fail_timeout=10s;
+  server 192.168.0.234 weight=1 max_conns=0 max_fails=1 fail_timeout=10s;
+}
+
+upstream planetarium-stream {
+  server 192.168.0.235 weight=1 max_conns=0 max_fails=1 fail_timeout=10s;
+  server 192.168.0.234 weight=1 max_conns=0 max_fails=1 fail_timeout=10s;
+}
+
+server {
+  listen 80;
+  server_name fsdn.corp www.fsdn.corp;
+  access_log /web/proxy/logs/access.log proxy;
+  error_log /web/proxy/logs/error.log warn;
+  server_tokens off;
+
+  proxy_http_version 1.1;
+  proxy_set_header Host $host;
+  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+  proxy_set_header X-Real-IP $remote_addr;
+  proxy_set_header X-Forwarded-Proto $scheme;
+
+  location "/" {
+    proxy_pass http://fsdn-stream;
+  }
+}
+
+server {
+  listen 80;
+  server_name planetarium.corp www.planetarium.corp;
+  access_log /web/proxy/logs/access.log proxy;
+  error_log /web/proxy/logs/error.log warn;
+
+  return 301 https://$server_name$request_uri;
+
+  server_tokens off;
+
+}
+
+server {
+  listen 443 ssl http2;
+  server_name planetarium.corp;
+  access_log /web/proxy/logs/access.log proxy;
+  error_log /web/proxy/logs/error.log warn;
+
+  server_tokens off;
+
+  ssl_certificate "/etc/nginx/auth/planetarium-prime256v1-crt.pem";
+  ssl_certificate_key "/etc/nginx/auth/planetarium-prime256v1-key.pem";
+  ssl_protocols TLSv1.3;
+  ssl_ciphers HIGH:!aNULL:!MD5;
+
+  ssl_session_cache shared:TLS:10m;
+  ssl_session_timeout 10m;
+
+  add_header Strict-Transport-Security max-age=604800;
+
+  proxy_http_version 1.1;
+  proxy_set_header Host $host;
+  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+  proxy_set_header X-Real-IP $remote_addr;
+  proxy_set_header X-Forwarded-Proto https;
+
+  location "/" {
+    proxy_pass http://planetarium-stream;
+  }
+}
+
